@@ -1,19 +1,24 @@
 """
-Agent AI pentru administrarea sistemului de fișiere folosind ADK și MCP.
+AI filesystem administrator wired for Google ADK, LiteLLM, and MCP tools.
 """
-import litellm
-from typing import Any, Dict, List
-from pathlib import Path
-import json
+from __future__ import annotations
+
+import os
 import sys
-import asyncio
-from fastmcp.client.transports import MCPConfigTransport
-from fastmcp import Client
+import warnings
+from pathlib import Path
+
 from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.tools import McpToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import (
+    StdioConnectionParams,
+)
+from mcp import StdioServerParameters
+
 
 # warnings suppression----------------------------------
 
-import warnings
 # Suppress deprecation warnings from httpx and aiohttp
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="httpx")
 warnings.filterwarnings(
@@ -21,256 +26,68 @@ warnings.filterwarnings(
 # Suppress ALL warnings from google.genai.types (including Pydantic custom classes)
 warnings.filterwarnings("ignore", module="google.genai.types")
 
-# model configuration ----------------------------------
 
-# Modelul folosit de LiteLLM (Ollama)
-LITELLM_MODEL = "ollama/llama3.2:latest"
+# Model configuration ----------------------------------
 
-# Configurare model pentru ADK (rămâne ca metadată)
-MODEL_NAME = "litellm/ollama/llama3.2:latest"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_LITELLM_MODEL = os.getenv(
+    "ADK_LITELLM_MODEL", "ollama_chat/gpt-oss:20b")
+MCP_STDIO_TIMEOUT = float(os.getenv("MCP_STDIO_TIMEOUT", "10.0"))
 
-# Clasă wrapper pentru a integra fastmcp.Client ca tool provider
-
-
-class MCPToolWrapper:
-    def __init__(self, client: Client):
-        self.client = client
-        self._tools = None  # cache tool defs
-
-    async def list_tools(self):
-        if self._tools is None:
-            async with self.client:
-                self._tools = await self.client.list_tools()
-        return self._tools
-
-    async def call(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
-        async with self.client:
-            return await self.client.call_tool(tool_name, arguments)
-
-    async def to_openai_tools(self) -> List[Dict[str, Any]]:
-        """
-        Transformă tool-urile MCP în format OpenAI tools pentru function calling.
-        Acceptă atât obiectele Tool (fastmcp) cât și dict-urile.
-        """
-        tools = await self.list_tools()
-        out: List[Dict[str, Any]] = []
-
-        for t in tools:
-            if isinstance(t, dict):
-                name = t.get("name")
-                description = t.get("description", "")
-                schema = t.get("input_schema") or t.get("inputSchema") or {
-                    "type": "object", "properties": {}}
-            else:
-                # Obiect fastmcp Tool
-                name = getattr(t, "name", None)
-                description = getattr(t, "description", "") or ""
-                schema = getattr(t, "input_schema", None) or getattr(
-                    t, "inputSchema", None) or {"type": "object", "properties": {}}
-
-            if not isinstance(schema, dict):
-                schema = {"type": "object", "properties": {}}
-
-            out.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "description": description,
-                        "parameters": schema,
-                    },
-                }
-            )
-        return out
-
-
-# Config MCP pentru stdio -> pornește serverul basic_agent.mcp_file
-MCP_CONFIG = {
-    "mcpServers": {
-        "filesystem_admin": {
-            "command": sys.executable,                     # Python din venv
-            # rulează serverul ca modul
-            "args": ["-u", "-m", "basic_agent.mcp_file"],
-            # IMPORTANT: cwd = rădăcina proiectului, NU basic_agent/
-            "cwd": str(Path(__file__).resolve().parents[1]),
-            "env": {},
-        }
-    }
-}
-
-# Client fastmcp pe baza config-ului
-mcp_client = Client(MCPConfigTransport(MCP_CONFIG))
-mcp_tool = MCPToolWrapper(mcp_client)
-
-# Definește agentul (ADK ca metadată/config)
-agent = LlmAgent(
-    name="SysAdmin_Agent",
-    model=MODEL_NAME,
-    description="Agent AI care administrează sistemul de fișiere și răspunde la întrebări despre directorul administrat.",
-    instruction="""
-    Ești un administrator de sistem inteligent și prietenos.
-    Folosește tool-urile MCP când ai nevoie de informații din sistemul de fișiere.
-    Răspunde în limba engleza.
-    """,
-    # tools=[mcp_tool],  # <- eliminat: nu este BaseTool/BaseToolset
+model_llama = LiteLlm(
+    model="ollama_chat/llama3.2:latest",
+    base_url="http://localhost:11434",
+    stream=True,
 )
 
 
-async def run_one_turn(user_input: str) -> str:
-    """
-    Un singur turn de conversație cu function-calling:
-    - trimite mesajul + tool-urile către LLM
-    - dacă LLM cere tool_call(s), le execută prin fastmcp
-    - re-trimite contextul + rezultate pentru răspunsul final
-    """
-    # 1) Construiește tool-urile pentru LLM
-    openai_tools = await mcp_tool.to_openai_tools()
+def _build_stdio_params() -> StdioConnectionParams:
+    """Prepare the stdio configuration used by ADK."""
 
-    # 2) Pornește conversația
-    messages = [
-        {"role": "system", "content": agent.instruction or ""},
-        {"role": "user", "content": user_input},
-    ]
-
-    # 3) Primul apel la LLM (poate cere tool-calls)
-    first = await litellm.acompletion(
-        model=LITELLM_MODEL,
-        messages=messages,
-        tools=openai_tools,
-        tool_choice="auto",
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-u", "-m", "basic_agent.mcp_file"],
+        cwd=str(PROJECT_ROOT),
+        env=dict(os.environ),
     )
-    # Normalizează mesajul și tool_calls (pot fi obiecte)
-    msg = first.choices[0].message
-    content = getattr(msg, "content", None)
-    if content is None and isinstance(msg, dict):
-        content = msg.get("content", "")
-
-    tool_calls_raw = getattr(msg, "tool_calls", None)
-    if tool_calls_raw is None and isinstance(msg, dict):
-        tool_calls_raw = msg.get("tool_calls")
-
-    # Funcții helper pentru extragere sigură
-    def _tc_id(tc):
-        return getattr(tc, "id", None) if not isinstance(tc, dict) else tc.get("id")
-
-    def _tc_function(tc):
-        f = getattr(tc, "function", None) if not isinstance(
-            tc, dict) else tc.get("function")
-        if f is None:
-            return None, {}
-        name = getattr(f, "name", None) if not isinstance(
-            f, dict) else f.get("name")
-        raw_args = getattr(f, "arguments", "{}") if not isinstance(
-            f, dict) else f.get("arguments", "{}")
-        if isinstance(raw_args, str):
-            try:
-                args = json.loads(raw_args)
-            except Exception:
-                args = {}
-        elif isinstance(raw_args, dict):
-            args = raw_args
-        else:
-            args = {}
-        return name, args
-
-    # Dacă nu sunt tool-calls -> răspuns direct
-    if not tool_calls_raw:
-        return content or ""
-
-    # 4) Execută tool-urile cerute de model
-    normalized_tool_calls = []
-    for tc in tool_calls_raw:
-        func_name, args = _tc_function(tc)
-        if not func_name:
-            continue
-        result_raw = await mcp_tool.call(func_name, args)
-
-        # Extrage conținutul serializabil din CallToolResult
-        if hasattr(result_raw, "content"):
-            # FastMCP CallToolResult are .content (list of TextContent/ImageContent/etc)
-            content_items = result_raw.content
-            if isinstance(content_items, list):
-                # Extrage text din fiecare item
-                result_str = "\n".join(
-                    getattr(item, "text", str(item)) if hasattr(
-                        item, "text") else str(item)
-                    for item in content_items
-                )
-            else:
-                result_str = str(content_items)
-        else:
-            result_str = str(result_raw)
-
-        # Construiește tool_call dict (format OpenAI)
-        normalized = {
-            "id": _tc_id(tc) or "",
-            "type": "function",
-            "function": {
-                "name": func_name,
-                "arguments": json.dumps(args, ensure_ascii=False),
-            },
-        }
-        normalized_tool_calls.append(normalized)
-        # Adaugă în context: tool call + rezultatul tool-ului
-        messages.append(
-            {"role": "assistant", "content": content or "", "tool_calls": [normalized]})
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": normalized["id"],
-                "name": func_name,
-                # <- folosește stringul extras, NU json.dumps(result_raw)
-                "content": result_str,
-            }
-        )
-
-    # 5) Al doilea apel pentru răspunsul final, după tool results
-    final = await litellm.acompletion(
-        model=LITELLM_MODEL,
-        messages=messages,
-    )
-    final_msg = final.choices[0].message
-    return getattr(final_msg, "content", None) or (final_msg.get("content") if isinstance(final_msg, dict) else "") or ""
+    return StdioConnectionParams(server_params=server_params, timeout=MCP_STDIO_TIMEOUT)
 
 
-async def main():
-    print("=" * 60)
-    print("Agent AI - Administrator de Sistem (LiteLLM + FastMCP)")
-    print("=" * 60)
-    print(f"Model LiteLLM: {LITELLM_MODEL}")
-    # afișează tool-urile disponibile din MCP pentru debug
-    try:
-        tools = await mcp_tool.list_tools()
-        # EVITĂ t.get(...) pe obiecte; folosește isinstance
-        tool_names = [t["name"] if isinstance(
-            t, dict) else getattr(t, "name", None) for t in tools]
-        print(f"Tool-uri MCP detectate: {tool_names}")
-    except Exception as e:
-        print(f"Nu s-au putut încărca tool-urile MCP: {e}")
-    print("Scrie 'exit' sau 'quit' pentru a ieși")
-    print("=" * 60)
-    print()
-
-    while True:
-        try:
-            user_input = input("Tu: ").strip()
-            if user_input.lower() in ["exit", "quit", "q"]:
-                print("\nLa revedere!")
-                break
-            if not user_input:
-                continue
-
-            print("\nAgent: ", end="", flush=True)
-            response = await run_one_turn(user_input)
-            print(response)
-            print()
-        except KeyboardInterrupt:
-            print("\n\nÎntrerupt de utilizator. La revedere!")
-            break
-        except Exception as e:
-            print(f"\nEroare: {e}")
-            print("Încearcă din nou.\n")
+# Shared toolset for the agent.
+filesystem_toolset = McpToolset(connection_params=_build_stdio_params())
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+SYSTEM_INSTRUCTION = """
+You are an AI system administrator responsible for managing files and directories on a computer system.
+You are using google adk, ollama, litellm and fastmcp.
+All file/directory paths in tool calls are relative to this base directory unless specified as absolute.
+
+Workflow:
+1. Explain briefly what you are about to inspect, then call the single best tool.
+2. After a tool responds, read its structured content (summary/data) and convert it to natural language. Never echo raw JSON back to the user.
+3. Only call the same tool again if you genuinely need additional information that was not already returned.
+
+Available tools (call EXACTLY as shown):
+- list_directory(dir_path=".") - list contents
+- get_file_content(file_path="path/to/file.txt") - read file
+- get_file_info(file_path="path") - metadata
+- search_files(pattern="*.txt", dir_path=".") - find files
+- get_directory_tree(dir_path=".", max_depth=3) - visualize structure
+- get_disk_usage(dir_path=".") - calculate size
+- find_large_files(dir_path=".", min_size_mb=1.0, limit=10) - largest files
+- count_files_by_extension(dir_path=".") - group by extension
+
+Final responses must be concise natural language such as:
+"The administered folder currently contains the single file secret.txt."
+"""
+
+# The ADK-compatible agent definition. This object is loaded by `google-adk cli/web`.
+root_agent = LlmAgent(
+    name="SysAdmin_Agent",
+    model=model_llama,
+    description="AI system administrator managing filesystem.",
+    instruction=SYSTEM_INSTRUCTION,
+    tools=[filesystem_toolset],
+)
+
+__all__ = ["root_agent"]
