@@ -1,0 +1,41 @@
+services:
+  ollama:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    # We do NOT mount a volume here because we want to use the model baked into the image.
+    # If you mount a volume to /root/.ollama, it will override the internal model directory.
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: mcp-server
+    ports:
+      - "8000:8000"
+    environment:
+      - MCP_AUTH_TOKEN=super-secret-token
+      - FILESYSTEM_ADMIN_ROOT=/data
+    volumes:
+      - ../folder_de_administrat:/data
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: agent
+    ports:
+      - "8080:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MCP_SERVER_URL=http://mcp-server:8000/sse
+      - MCP_AUTH_TOKEN=super-secret-token
+    depends_on:
+      - ollama
+      - mcp-server
+    restart: unless-stopped

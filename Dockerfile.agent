@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+# RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the application code
+COPY . .
+
+# Expose the port ADK web runs on (default 3000 or similar, checking docs/logs)
+# ADK web usually binds to localhost, we need to make sure it binds to 0.0.0.0
+# and we need to know the port. Assuming 5000 or 8080 or similar based on previous logs.
+# User logs showed "127.0.0.1:52437", which is random.
+# We should probably set a fixed port if possible, or expose the default.
+# `adk web` might not be production ready server, but we will use it as requested.
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Command to run the agent
+# We need to ensure it listens on 0.0.0.0
+# We run ls -R to verify files are present in logs if it fails
+CMD ["sh", "-c", "ls -R /app && adk web /app --host 0.0.0.0 --port 8080"]

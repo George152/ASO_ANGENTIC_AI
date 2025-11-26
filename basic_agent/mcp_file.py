@@ -93,17 +93,57 @@ def _format_value(value: Any) -> str:
     return str(value)
 
 
-def _make_result(summary: str, **data) -> ToolResult:
+def function_make_response(summary: str, **data) -> ToolResult:
     """
     Build a ToolResult that provides human-friendly text plus structured metadata.
+    This replaces the old _make_result to ensure the LLM gets a clear natural language description.
     """
     structured: Dict[str, object] = {"summary": summary}
     if data:
         structured["data"] = data
 
+    # Construct a rich natural language response
     text_lines = [summary]
-    for key, value in data.items():
-        text_lines.append(f"- {key}: {_format_value(value)}")
+    
+    # Add specific formatting based on the data keys to make it more "natural"
+    if "entries" in data and isinstance(data["entries"], list):
+        entries = data["entries"]
+        if entries:
+            text_lines.append("\nHere are the items found:")
+            for entry in entries:
+                text_lines.append(f"- {entry}")
+        else:
+            text_lines.append("\nThe directory is empty.")
+            
+    elif "content" in data and isinstance(data["content"], str):
+        text_lines.append("\nFile Content:")
+        text_lines.append("```")
+        text_lines.append(data["content"])
+        text_lines.append("```")
+        
+    elif "tree" in data and isinstance(data["tree"], list):
+        text_lines.append("\nDirectory Structure:")
+        text_lines.append("```")
+        text_lines.extend(data["tree"])
+        text_lines.append("```")
+        
+    elif "files" in data and isinstance(data["files"], list):
+        text_lines.append("\nLarge Files Found:")
+        for f in data["files"]:
+            text_lines.append(f"- {f.get('path', 'unknown')} ({f.get('size_mb', 0)} MB)")
+            
+    elif "counts" in data and isinstance(data["counts"], list):
+        text_lines.append("\nFile Counts by Extension:")
+        for ext, count in data["counts"]:
+            text_lines.append(f"- {ext}: {count}")
+            
+    # Fallback for generic data
+    else:
+        for key, value in data.items():
+            # Skip keys we've already handled or that are redundant with summary
+            if key in ["path", "summary", "entries", "content", "tree", "files", "counts"]:
+                continue
+            text_lines.append(f"- {key}: {_format_value(value)}")
 
     return ToolResult(
         content=[TextContent(type="text", text="\n".join(text_lines))],
@@ -141,8 +181,8 @@ def get_file_content(file_path: str) -> Dict[str, object]:
     size = path.stat().st_size
     try:
         content = path.read_text(encoding="utf-8")
-        summary = f"Read {len(content.splitlines())} line(s) from '{rel}'."
-        return _make_result(
+        summary = f"Successfully read {len(content.splitlines())} line(s) from '{rel}'."
+        return function_make_response(
             summary,
             path=rel,
             size_bytes=size,
@@ -151,7 +191,7 @@ def get_file_content(file_path: str) -> Dict[str, object]:
         )
     except UnicodeDecodeError:
         summary = f"The file '{rel}' is binary or not UTF-8 decodable."
-        return _make_result(
+        return function_make_response(
             summary, path=rel, size_bytes=size, is_text=False, content=None
         )
 
@@ -181,7 +221,7 @@ def list_directory(dir_path: str = ".") -> Dict[str, object]:
     else:
         summary = f"Directory '{rel}' contains {count} item(s)."
 
-    return _make_result(summary, path=rel, count=count, entries=entries)
+    return function_make_response(summary, path=rel, count=count, entries=entries)
 
 
 @mcp.tool()
@@ -197,7 +237,7 @@ def get_file_info(file_path: str) -> Dict[str, object]:
     st = path.stat()
     kind = "directory" if path.is_dir() else "file"
     summary = f"Metadata retrieved for '{rel}'."
-    return _make_result(
+    return function_make_response(
         summary,
         path=rel,
         type=kind,
@@ -235,7 +275,7 @@ def search_files(pattern: str, dir_path: str = ".") -> Dict[str, object]:
     else:
         summary = f"Found {len(results)} match(es) for '{pattern}' inside '{rel_base}'."
 
-    return _make_result(
+    return function_make_response(
         summary,
         base_path=rel_base,
         pattern=pattern,
@@ -281,7 +321,7 @@ def get_directory_tree(dir_path: str = ".", max_depth: int = 3) -> Dict[str, obj
     tree_lines = [f"{rel}/"]
     tree_lines.extend(_tree(base))
     summary = f"Generated tree for '{rel}' up to depth {max_depth}."
-    return _make_result(summary, path=rel, max_depth=max_depth, tree=tree_lines)
+    return function_make_response(summary, path=rel, max_depth=max_depth, tree=tree_lines)
 
 
 @mcp.tool()
@@ -310,7 +350,7 @@ def get_disk_usage(dir_path: str = ".") -> Dict[str, object]:
     size_mb = round(total_size / 1024 / 1024, 2)
     rel = _relative_display(base)
     summary = f"Calculated disk usage for '{rel}'."
-    return _make_result(
+    return function_make_response(
         summary,
         path=rel,
         size_bytes=total_size,
@@ -360,7 +400,7 @@ def find_large_files(
             f"Top {len(files)} file(s) >= {min_size_mb} MB found in '{rel}'."
         )
 
-    return _make_result(
+    return function_make_response(
         summary,
         path=rel,
         min_size_mb=min_size_mb,
@@ -397,7 +437,7 @@ def count_files_by_extension(dir_path: str = ".") -> Dict[str, object]:
         sorted_counts = sorted(
             counts.items(), key=lambda x: x[1], reverse=True)
 
-    return _make_result(summary, path=rel, counts=sorted_counts)
+    return function_make_response(summary, path=rel, counts=sorted_counts)
 
 
 if __name__ == "__main__":

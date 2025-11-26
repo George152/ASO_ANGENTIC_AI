@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies if needed (e.g. for psutil)
+# RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install uvicorn starlette
+
+# Copy the application code
+COPY . .
+
+# Expose the port
+EXPOSE 8000
+
+# Set the entrypoint
+CMD ["python", "-m", "basic_agent.mcp_server"]
