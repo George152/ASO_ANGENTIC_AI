@@ -1,0 +1,17 @@
+# Google ADK (Agents Development Kit)
+google-adk
+
+# LiteLLM pentru integrarea cu Ollama
+litellm>=1.40.0
+
+# FastMCP pentru serverul MCP
+fastmcp>=2.0.0
+
+# psutil pentru monitorizarea proceselor și sistemului
+psutil>=5.9.0
+
+# Dependințe core (instalate automat, dar specificate pentru claritate)
+pydantic>=2.0.0
+httpx>=0.27.0
+aiohttp>=3.9.0
+asyncio>=3.4.3

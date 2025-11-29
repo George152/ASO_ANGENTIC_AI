@@ -13,9 +13,9 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools import McpToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import (
     StdioConnectionParams,
+    SseConnectionParams,
 )
 from mcp import StdioServerParameters
-
 
 # warnings suppression----------------------------------
 
@@ -45,13 +45,6 @@ model_llama = LiteLlm(
     stream=True,
     # temperature=0, # Force deterministic output
 )
-
-
-from google.adk.tools.mcp_tool.mcp_session_manager import (
-    StdioConnectionParams,
-    SseConnectionParams,
-)
-from mcp import StdioServerParameters
 
 def _build_connection_params() -> StdioConnectionParams | SseConnectionParams:
     """Prepare the connection configuration used by ADK."""

@@ -1,0 +1,82 @@
+Jurnal Faza 2 / Partea Dockerizare
+================================
+
+Cerințele rezolvate
+-------------------
+Obiectivul principal al acestei faze a fost containerizarea sistemului de agenți inteligenți, compus din agentul ADK (Google Agent Development Kit), serverul MCP (Model Context Protocol) și serviciul Ollama pentru inferență LLM locală.
+Utilitatea în situații reale:
+- **Portabilitate**: Sistemul poate fi rulat pe orice mașină care are Docker instalat, fără a necesita configurarea manuală a mediului Python sau instalarea Ollama.
+- **Izolare**: Fiecare componentă rulează în propriul container, evitând conflictele de dependențe.
+- **Scalabilitate și Reproducere**: Configurarea prin `docker-compose` asigură că mediul este identic la fiecare rulare.
+
+Modul de rezolvare
+------------------
+Această secțiune descrie pașii tehnici efectuați pentru containerizarea soluției.
+
+### 1. Descrierea pachetelor și componentelor
+- **Docker & Docker Compose**: Utilizate pentru orchestrarea containerelor.
+- **Python 3.11-slim**: Imaginea de bază pentru containerele agentului și serverului MCP, aleasă pentru dimensiunea redusă.
+- **Ollama**: Serviciu pentru rularea modelelor LLM (ex. llama3.2) local.
+- **Biblioteci Python**:
+    - `google-adk`: Framework-ul pentru agent.
+    - `fastmcp`: Pentru crearea serverului MCP.
+    - `uvicorn/starlette`: Pentru expunerea serverului MCP prin HTTP (SSE).
+
+### 2. Realizarea configurațiilor (Fișiere și Modificări)
+
+#### A. Dockerfile.mcp (Serverul MCP)
+Am creat un fișier `Dockerfile.mcp` dedicat serverului care gestionează fișierele.
+- **Configurare**: Multi-stage build pentru optimizare. Instalează dependențele și copiază codul sursă.
+- **Expunere**: Portul 8000 pentru comunicarea SSE.
+- **Comandă**: Rulează modulul `basic_agent.mcp_server`.
+
+#### B. Dockerfile.agent (Agentul ADK)
+Am creat `Dockerfile.agent` pentru interfața web a agentului.
+- **Configurare**: Instalează dependențele și copiază codul aplicației.
+- **Expunere**: Portul 9000 pentru interfața web ADK.
+- **Comandă**: Rulează `adk web` pe host `0.0.0.0`.
+
+#### C. docker-compose.yml (Orchestrare)
+Fișierul central care definește serviciile:
+1.  **ollama**:
+    -   Imagine oficială `ollama/ollama`.
+    -   Volum: `C:/Users/User/.ollama:/root/.ollama` pentru persistența modelelor descărcate.
+    -   Port: 11434.
+2.  **mcp-server**:
+    -   Construit din `Dockerfile.mcp`.
+    -   Variabile de mediu: `FILESYSTEM_ADMIN_ROOT=/data` (calea internă).
+    -   Volume: Montează directorul local definit în `.env` la `/data` în container.
+3.  **adk-web**:
+    -   Construit din `Dockerfile.agent`.
+    -   Variabile de mediu critice:
+        -   `OLLAMA_API_BASE=http://ollama:11434`: Pentru comunicarea internă Docker.
+        -   `MCP_SERVER_URL=http://mcp-server:8000/sse`: Pentru conectarea la MCP.
+
+#### D. Configurare Mediu (.env)
+Am creat un fișier `.env` în rădăcina proiectului pentru a gestiona căile locale fără a le hard-coda în `docker-compose.yml`.
+- `FILESYSTEM_ADMIN_ROOT`: Specifică calea absolută către directorul de administrat de pe mașina gazdă.
+
+### 3. Scripturi și Modificări de Cod
+- **agent.py**: Am modificat logica de conectare pentru a suporta SSE (Server-Sent Events) atunci când variabila `MCP_SERVER_URL` este prezentă. Acest lucru permite agentului să comunice cu serverul MCP prin HTTP în rețeaua Docker, în loc de procese locale (stdio).
+
+Probleme întâlnite și modul de rezolvare
+----------------------------------------
+
+### 1. Conectarea Agentului la Ollama
+**Problema**: Agentul, rulând în container, încerca să acceseze Ollama la `localhost:11434`. Deoarece `localhost` în container se referă la containerul însuși, conexiunea eșua.
+**Rezolvare**: Am setat variabila de mediu `OLLAMA_API_BASE=http://ollama:11434` în serviciul `adk-web`. Aceasta instruiește biblioteca `litellm` să folosească numele serviciului Docker (`ollama`) pentru rezoluția DNS internă.
+
+### 2. Accesul la Fișierele Gazdă (Mounting)
+**Problema**: Agentul nu vedea fișierele din directorul specificat în `.env`-ul original, deoarece calea de pe Windows nu exista în container.
+**Rezolvare**:
+- Am creat un fișier `.env` în rădăcina proiectului (unde rulează `docker compose`).
+- Am configurat volumul în `docker-compose.yml` folosind sintaxa `${FILESYSTEM_ADMIN_ROOT}:/data`.
+- Astfel, Docker mapează directorul de pe Windows la `/data` în container, iar agentul lucrează transparent cu `/data`.
+
+### 3. Formatul Răspunsului Agentului
+**Problema**: Inițial, agentul răspundea în format JSON brut.
+**Rezolvare**: Am ajustat instrucțiunile de sistem (`SYSTEM_INSTRUCTION`) și funcția `function_make_response` pentru a prioritiza rezumatele în limbaj natural, asigurând o interacțiune fluidă cu utilizatorul.
+
+Concluzii
+---------
+În această fază, am reușit să transformăm un agent care rula local într-o aplicație distribuită, containerizată complet. Am învățat despre importanța rețelelor interne Docker pentru comunicarea între servicii și despre gestionarea volumelor pentru a permite accesul controlat la sistemul de fișiere al gazdei. Sistemul este acum robust, ușor de instalat și pregătit pentru utilizare extinsă.
